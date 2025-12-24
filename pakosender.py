@@ -103,24 +103,7 @@ def receive(target_ip, passcode):
 
     print(f"\n[✓] DONE. File saved as 'received_{file_name}'")
     s.close()
-    shared_psc = passcode.encode('utf-8')
-    receiver = SPAKE2_B(shared_psc)
     
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    print(f"[*] Connecting to {target_ip}:9000...")
-    s.connect((target_ip, 9000))
-
-    alice_msg = s.recv(1024)
-    s.send(receiver.start())
-    key = receiver.finish(alice_msg)
-    print("[+] Secure connection established.")
-
-    data = s.recv(1024 * 1024 * 100) 
-    with open("gelen_dosya.bin", "wb") as f:
-        f.write(data)
-    print("[✓] File received.")
-    s.close()
-
 def main():
     devices = load_contacts()
     parser = argparse.ArgumentParser(prog="pako")
