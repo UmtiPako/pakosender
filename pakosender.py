@@ -4,7 +4,9 @@ import os
 import shlex
 import socket
 
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from spake2 import SPAKE2_A, SPAKE2_B
+
 
 class Contact:
     def __init__(self, name, ip_addr):
@@ -18,14 +20,12 @@ def load_contacts():
     try:
         with open("contacts.json", "r") as data:
             devices_dict = json.load(data)
-
             return [Contact(item['name'], item['ip_addr']) for item in devices_dict]
     except (FileNotFoundError, json.JSONDecodeError):
         return []
 
 def add_contact(name: str, ipv4: str):
     devices = load_contacts() 
-    
     new_contact = Contact(name, ipv4)
     devices.append(new_contact)
     
@@ -50,23 +50,34 @@ def send(file_path, passcode):
 
     conn.send(sender.start())
     received_msg = conn.recv(1024)
-    key = sender.finish(received_msg)
-    print("[+] KEY established via SPAKE2.")
+    key = sender.finish(received_msg) 
+    
+    aesgcm = AESGCM(key)
+    nonce = os.urandom(12) 
+    conn.send(nonce) 
+    print("[+] KEY established and ENCRYPTION initialized.")
 
     file_name = os.path.basename(file_path)
     file_size = os.path.getsize(file_path)
     header = f"{file_name}:{file_size}".encode('utf-8')
-    conn.send(header)
+    enc_header = aesgcm.encrypt(nonce, header, None)
     
-    conn.recv(1024) 
+    conn.send(len(enc_header).to_bytes(4, 'big'))
+    conn.send(enc_header)
+    
+    conn.recv(1024)
 
-    print(f"[*] SENDING: {file_name} ({file_size} bytes)")
+    print(f"[*] SENDING ENCRYPTED: {file_name} ({file_size} bytes)")
     with open(file_path, "rb") as f:
         while True:
-            chunk = f.read(8192) 
-            if not chunk:
-                break
-            conn.sendall(chunk)
+            chunk = f.read(128 * 1024) 
+            if not chunk: break
+            
+            chunk_nonce = os.urandom(12)
+            enc_chunk = aesgcm.encrypt(chunk_nonce, chunk, None)
+            conn.sendall(len(enc_chunk).to_bytes(4, 'big'))
+            conn.sendall(enc_chunk)
+            conn.sendall(chunk_nonce)
             
     print("[✓] TRANSFER COMPLETE.")
     conn.close()
@@ -75,35 +86,49 @@ def send(file_path, passcode):
 def receive(target_ip, passcode):
     shared_psc = passcode.encode('utf-8')
     receiver = SPAKE2_B(shared_psc)
-    
+
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     print(f"[*] CONNECTING to {target_ip}:9000...")
     s.connect((target_ip, 9000))
 
-    alice_msg = s.recv(1024)
+    msg = s.recv(1024)
     s.send(receiver.start())
-    key = receiver.finish(alice_msg)
+    key = receiver.finish(msg)
+
+    aesgcm = AESGCM(key)
+    header_nonce = s.recv(12)
     print("[+] SECURE connection established.")
 
-    header = s.recv(1024).decode('utf-8')
+    h_len = int.from_bytes(s.recv(4), 'big')
+    enc_header = s.recv(h_len)
+    header = aesgcm.decrypt(header_nonce, enc_header, None).decode('utf-8')
+    
     file_name, file_size = header.split(":")
     file_size = int(file_size)
-    s.send(b"READY") 
+    s.send(b"READY")
 
-    print(f"[*] RECEIVING: {file_name}")
+    print(f"[*] RECEIVING & DECRYPTING: {file_name}")
     with open(f"received_{file_name}", "wb") as f:
         received_bytes = 0
         while received_bytes < file_size:
-            chunk = s.recv(8192)
-            if not chunk:
-                break
+            len_data = s.recv(4)
+            if not len_data: break
+            chunk_len = int.from_bytes(len_data, 'big')
+            
+            enc_chunk = b""
+            while len(enc_chunk) < chunk_len:
+                remaining = chunk_len - len(enc_chunk)
+                enc_chunk += s.recv(remaining)
+            
+            chunk_nonce = s.recv(12)
+            chunk = aesgcm.decrypt(chunk_nonce, enc_chunk, None)
             f.write(chunk)
             received_bytes += len(chunk)
             print(f"Progress: {received_bytes}/{file_size}", end="\r")
 
     print(f"\n[✓] DONE. File saved as 'received_{file_name}'")
     s.close()
-    
+
 def main():
     devices = load_contacts()
     parser = argparse.ArgumentParser(prog="pako")
